@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:apis": "tsx scripts/test-apis.ts",
+    "test:monitor": "tsx scripts/test-monitor.ts",
+    "generate:agent": "tsx scripts/generate-agent-keypair.ts",
+    "check:agent": "tsx scripts/check-agent-balance.ts",
     "dev": "concurrently -n v,s -c blue,green \"vite\" \"tsx server/index.ts\"",
     "dev:client": "vite",
     "dev:server": "tsx server/index.ts",
@@ -13,10 +17,6 @@
   },
   "dependencies": {
     "@privy-io/react-auth": "^3.17.0",
-    "@solana-program/memo": "^0.11.0",
-    "@solana-program/system": "^0.11.0",
-    "@solana-program/token": "^0.11.0",
-    "@solana/kit": "^6.0.0",
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.98.0",
     "cors": "^2.8.5",
