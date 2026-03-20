@@ -7,6 +7,7 @@ interface VaultBalances {
   usdc: number;
   sol: number;
   totalUsd: number;
+  demo?: boolean;
 }
 
 interface ComplianceStatus {
@@ -43,7 +44,12 @@ function DashboardContent() {
   const [monitorLoading, setMonitorLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState<{ configured: boolean; address: string | null; message: string } | null>(null);
   const [executeLoading, setExecuteLoading] = useState(false);
-  const [executeResult, setExecuteResult] = useState<{ executed: boolean; signature?: string; error?: string } | null>(null);
+  const [executeResult, setExecuteResult] = useState<{ executed: boolean; signature?: string; error?: string; hint?: string } | null>(null);
+  const [demoMode, setDemoMode] = useState(() => localStorage.getItem("atms-demo-mode") === "true");
+
+  useEffect(() => {
+    localStorage.setItem("atms-demo-mode", String(demoMode));
+  }, [demoMode]);
 
   const fetchBalances = useCallback(async () => {
     const res = await fetch("/api/vault/balances");
@@ -60,13 +66,14 @@ function DashboardContent() {
   const fetchProposals = useCallback(async () => {
     setProposalsLoading(true);
     try {
-      const res = await fetch("/api/proposals");
+      const url = demoMode ? "/api/proposals?demo=1" : "/api/proposals";
+      const res = await fetch(url);
       const data = await res.json();
       if (res.ok) setProposals(data.proposals ?? []);
     } finally {
       setProposalsLoading(false);
     }
-  }, []);
+  }, [demoMode]);
 
   const fetchCompliance = useCallback(async () => {
     const wallet = user?.wallet?.address ?? user?.linkedAccounts?.find((a) => a.type === "wallet")?.address;
@@ -113,7 +120,7 @@ function DashboardContent() {
         }),
       });
       const data = await res.json();
-      setExecuteResult({ executed: data.executed, signature: data.signature, error: data.error });
+      setExecuteResult({ executed: data.executed, signature: data.signature, error: data.error, hint: data.hint });
       if (data.executed) fetchBalances();
     } catch {
       setExecuteResult({ executed: false, error: "Request failed" });
@@ -125,7 +132,10 @@ function DashboardContent() {
   const handleRunMonitor = async () => {
     setMonitorLoading(true);
     try {
-      const res = await fetch("/api/monitor/run", { method: "POST" });
+      const res = await fetch("/api/monitor/run", {
+        method: "POST",
+        headers: demoMode ? { "X-Demo-Mode": "true" } : {},
+      });
       const data = await res.json();
       if (res.ok) setProposals(data.proposals ?? []);
     } finally {
@@ -139,11 +149,51 @@ function DashboardContent() {
     try {
       const res = await fetch("/api/propose-swap", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(demoMode ? { "X-Demo-Mode": "true" } : {}),
+        },
         body: JSON.stringify({
           inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           outputMint: "So11111111111111111111111111111111111111112",
           amount: "1000000",
+        }),
+      });
+      const data = await res.json();
+      setProposeResult(data);
+      if (data.proposed) fetchBalances();
+    } catch {
+      setProposeResult({ proposed: false, rationale: "Request failed" });
+    } finally {
+      setProposeLoading(false);
+    }
+  };
+
+  const DIRECTION_MINTS: Record<string, { inputMint: string; outputMint: string }> = {
+    "USDC→SOL": { inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", outputMint: "So11111111111111111111111111111111111111112" },
+    "SOL→USDC": { inputMint: "So11111111111111111111111111111111111111112", outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+    "USDT→SOL": { inputMint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", outputMint: "So11111111111111111111111111111111111111112" },
+    "SOL→USDT": { inputMint: "So11111111111111111111111111111111111111112", outputMint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" },
+    "PYUSD→SOL": { inputMint: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", outputMint: "So11111111111111111111111111111111111111112" },
+    "SOL→PYUSD": { inputMint: "So11111111111111111111111111111111111111112", outputMint: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo" },
+  };
+
+  const handleProposeFromOpportunity = async (p: Proposal) => {
+    const mints = DIRECTION_MINTS[p.direction];
+    if (!mints) return;
+    setProposeLoading(true);
+    setProposeResult(null);
+    try {
+      const res = await fetch("/api/propose-swap", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(demoMode ? { "X-Demo-Mode": "true" } : {}),
+        },
+        body: JSON.stringify({
+          inputMint: mints.inputMint,
+          outputMint: mints.outputMint,
+          amount: p.inAmount,
         }),
       });
       const data = await res.json();
@@ -177,6 +227,19 @@ function DashboardContent() {
           <Link to="/deposit" className="text-lg text-slate-400 transition hover:text-white">
             Deposit
           </Link>
+          <label className="flex cursor-pointer items-center gap-2">
+            <span className="text-lg text-slate-400">Demo</span>
+            <button
+              role="switch"
+              aria-checked={demoMode}
+              onClick={() => setDemoMode((v) => !v)}
+              className={`relative h-7 w-12 rounded-full transition ${demoMode ? "bg-cyan-500" : "bg-slate-700"}`}
+            >
+              <span
+                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${demoMode ? "left-7" : "left-1"}`}
+              />
+            </button>
+          </label>
           <button onClick={() => logout()} className="text-lg text-slate-400 transition hover:text-white">
             Logout
           </button>
@@ -184,6 +247,17 @@ function DashboardContent() {
       </header>
 
       <div className="mx-auto max-w-5xl space-y-12">
+        {(balances?.demo || demoMode) && (
+          <div className="rounded-xl border-2 border-amber-500/30 bg-amber-500/10 p-5">
+            <p className="text-base font-medium text-amber-400">
+              Demo mode — Simulated balances. Mock opportunity shown when list is empty.
+            </p>
+            <p className="mt-1 text-sm text-slate-500">
+              Use &quot;Create Squads Proposal&quot; on an opportunity to pass it through Squads (simulated when vault not configured).
+            </p>
+          </div>
+        )}
+
         {/* Compliance Status */}
         <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-8">
           <h2 className="mb-6 text-lg font-semibold uppercase tracking-wider text-slate-500">
@@ -282,7 +356,12 @@ function DashboardContent() {
                       </a>
                     </p>
                   ) : (
-                    <p className="text-lg text-amber-400">{executeResult.error}</p>
+                    <div>
+                      <p className="text-lg text-amber-400">{executeResult.error}</p>
+                      {executeResult.hint && (
+                        <p className="mt-2 text-base text-slate-400">{executeResult.hint}</p>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -327,6 +406,49 @@ function DashboardContent() {
               )}
               {proposeResult.message && (
                 <p className="mt-1 text-base text-slate-500">{proposeResult.message}</p>
+              )}
+              {proposeResult.proposed && proposeResult.squads?.workflow && (
+                <div className="mt-4 space-y-2 rounded-lg bg-slate-800/50 p-4">
+                  <p className="text-sm font-medium text-slate-400">Squads workflow</p>
+                  {proposeResult.squads.workflow.map((w) => (
+                    <div key={w.step} className="flex items-center gap-3 text-sm">
+                      <span
+                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${
+                          w.done ? "bg-cyan-500/30 text-cyan-400" : "bg-slate-700 text-slate-500"
+                        }`}
+                      >
+                        {w.done ? "✓" : w.step}
+                      </span>
+                      <span className={w.done ? "text-cyan-300" : "text-slate-400"}>{w.label}</span>
+                    </div>
+                  ))}
+                  {proposeResult.squads?.demo && (
+                    <p className="mt-2 text-xs text-slate-500">
+                      Demo — configure Squads for real multi-sig approval.
+                    </p>
+                  )}
+                  <a
+                    href="https://v2.squads.so"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-4 inline-flex items-center gap-2 rounded-lg border-2 border-cyan-500/50 bg-cyan-500/10 px-4 py-2.5 text-sm font-medium text-cyan-400 transition hover:bg-cyan-500/20"
+                  >
+                    Open Squads to approve
+                    <span className="text-cyan-500">→</span>
+                  </a>
+                </div>
+              )}
+              {proposeResult.proposed && proposeResult.squads?.signature && (
+                <p className="mt-3 text-sm text-cyan-400">
+                  <a
+                    href="https://v2.squads.so"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline hover:no-underline"
+                  >
+                    View proposal in Squads →
+                  </a>
+                </p>
               )}
             </div>
           )}

@@ -89,6 +89,20 @@ export async function runMarketMonitor(): Promise<{ found: number; proposals: Pr
   return { found, proposals: getProposals() };
 }
 
+const DEMO_OPPORTUNITIES: Omit<Proposal, "id" | "createdAt">[] = [
+  { direction: "USDC→SOL", inAmount: "10000000", outAmount: "6700000", priceImpactPct: "0.18", rationale: "Yield opportunity ~0.18%. Favorable spread for treasury rebalancing. Low slippage.", recommend: true },
+  { direction: "SOL→USDC", inAmount: "1000000000", outAmount: "152000000", priceImpactPct: "0.15", rationale: "Stablecoin allocation opportunity. Lock in gains with minimal impact.", recommend: true },
+  { direction: "USDT→SOL", inAmount: "5000000", outAmount: "3350000", priceImpactPct: "0.12", rationale: "Diversification into SOL. Attractive entry with low price impact.", recommend: true },
+];
+
+export async function runMarketMonitorDemo(): Promise<{ found: number; proposals: Proposal[] }> {
+  proposals.splice(0, proposals.length);
+  for (const opp of DEMO_OPPORTUNITIES) {
+    addProposal(opp);
+  }
+  return { found: DEMO_OPPORTUNITIES.length, proposals: getProposals() };
+}
+
 export function getProposals(): Proposal[] {
   return [...proposals];
 }

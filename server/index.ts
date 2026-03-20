@@ -5,6 +5,8 @@ import { askDeepseek } from "./deepseek.js";
 import { jupiterFetch } from "./jupiter.js";
 import { runMarketMonitor, getProposals } from "./monitor.js";
 import { getAgentKeypair, getAgentAddress, hasAgent } from "./agent.js";
+import { createSquadsProposalFromSwap, hasSquadsConfig } from "./squads.js";
+import { addMemoToSwapTransaction } from "./memo.js";
 import { JUPITER_QUOTE_API, JUPITER_SWAP_API, JUPITER_SWAP_TX_API, TOKENS } from "./constants.js";
 import { Connection, PublicKey, VersionedTransaction } from "@solana/web3.js";
 import { getAccount, getAssociatedTokenAddress } from "@solana/spl-token";
@@ -32,40 +34,84 @@ app.get("/api/quote", async (req, res) => {
   }
 });
 
+const DIRECTION_TO_MINTS: Record<string, { inputMint: string; outputMint: string }> = {
+  "USDC→SOL": { inputMint: TOKENS.USDC, outputMint: TOKENS.SOL },
+  "SOL→USDC": { inputMint: TOKENS.SOL, outputMint: TOKENS.USDC },
+  "USDT→SOL": { inputMint: TOKENS.USDT, outputMint: TOKENS.SOL },
+  "SOL→USDT": { inputMint: TOKENS.SOL, outputMint: TOKENS.USDT },
+  "PYUSD→SOL": { inputMint: TOKENS.PYUSD, outputMint: TOKENS.SOL },
+  "SOL→PYUSD": { inputMint: TOKENS.SOL, outputMint: TOKENS.PYUSD },
+};
+
 app.post("/api/propose-swap", async (req, res) => {
   try {
     const { inputMint, outputMint, amount } = req.body || {};
     const inMint = inputMint ?? TOKENS.USDC;
     const outMint = outputMint ?? TOKENS.SOL;
     const amt = amount ?? "1000000";
+    const demoMode = req.headers["x-demo-mode"] === "true";
 
+    const vaultState = { usdcBalance: 100_000, solBalance: 100, totalUsd: 115_000 };
+    let quoteSummary: { inputMint: string; outputMint: string; inAmount: string; outAmount: string; priceImpactPct?: string };
+    let quote: { outAmount?: string; priceImpactPct?: string; [k: string]: unknown } = {};
     const headers: Record<string, string> = {};
     if (process.env.JUPITER_API_KEY) headers["x-api-key"] = process.env.JUPITER_API_KEY;
 
-    const { res: quoteRes, data: quote } = await jupiterFetch(
-      `${JUPITER_QUOTE_API}?inputMint=${inMint}&outputMint=${outMint}&amount=${amt}&slippageBps=50`,
-      { headers, signal: AbortSignal.timeout(15000) }
-    );
-    if (!quoteRes.ok || quote.error) {
-      return res.status(500).json({
-        error: quote.message ?? "Jupiter quote failed",
-        proposed: false,
-      });
+    if (demoMode) {
+      const isStableToSol = outMint === TOKENS.SOL;
+      quoteSummary = {
+        inputMint: inMint,
+        outputMint: outMint,
+        inAmount: amt,
+        outAmount: isStableToSol ? "6700000" : "120000000",
+        priceImpactPct: "0.18",
+      };
+    } else {
+      const { res: quoteRes, data: quoteData } = await jupiterFetch(
+        `${JUPITER_QUOTE_API}?inputMint=${inMint}&outputMint=${outMint}&amount=${amt}&slippageBps=50`,
+        { headers, signal: AbortSignal.timeout(15000) }
+      );
+      if (!quoteRes.ok || quoteData.error) {
+        return res.status(500).json({
+          error: (quoteData as { message?: string }).message ?? "Jupiter quote failed",
+          proposed: false,
+        });
+      }
+      quote = quoteData as typeof quote;
+
+      quoteSummary = {
+        inputMint: inMint,
+        outputMint: outMint,
+        inAmount: amt,
+        outAmount: quote.outAmount ?? "0",
+        priceImpactPct: quote.priceImpactPct,
+      };
     }
 
-    const vaultState = { usdcBalance: 100_000, solBalance: 100, totalUsd: 115_000 };
-    const quoteSummary = {
-      inputMint: inMint,
-      outputMint: outMint,
-      inAmount: amt,
-      outAmount: quote.outAmount ?? "0",
-      priceImpactPct: quote.priceImpactPct,
-    };
+    if (demoMode) {
+      return res.json({
+        proposed: true,
+        rationale: "Yield opportunity ~0.18%. Low-impact treasury rebalancing. (Demo — AI bypassed; would evaluate in production.)",
+        message: "Squads workflow simulated.",
+        squads: {
+          demo: true,
+          workflow: [
+            { step: 1, done: true, label: "Vault tx created" },
+            { step: 2, done: true, label: "Proposal created" },
+            { step: 3, done: false, label: "Await member approval in Squads" },
+            { step: 4, done: false, label: "Execute when approved" },
+          ],
+        },
+      });
+    }
 
     const recommendation = await askDeepseek(vaultState, quoteSummary);
 
     if (!recommendation.recommend) {
-      return res.json({ proposed: false, rationale: recommendation.rationale });
+      return res.json({
+        proposed: false,
+        rationale: recommendation.rationale,
+      });
     }
 
     if (!VAULT) {
@@ -73,6 +119,56 @@ app.post("/api/propose-swap", async (req, res) => {
         error: "Squads vault not configured",
         proposed: false,
         rationale: recommendation.rationale,
+      });
+    }
+
+    if (hasSquadsConfig()) {
+      const { res: swapRes, data: swapData } = await jupiterFetch<{ swapTransaction?: string; error?: string }>(
+        JUPITER_SWAP_TX_API,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...headers },
+          body: JSON.stringify({ quoteResponse: quote, userPublicKey: VAULT, wrapAndUnwrapSol: true }),
+          signal: AbortSignal.timeout(15000),
+        }
+      );
+      if (!swapRes.ok || !swapData.swapTransaction) {
+        return res.status(500).json({
+          error: swapData.error ?? "Swap transaction failed",
+          proposed: false,
+          rationale: recommendation.rationale,
+        });
+      }
+
+      const squadsResult = await createSquadsProposalFromSwap(
+        swapData.swapTransaction,
+        VAULT,
+        `ATMS swap: ${inMint.slice(0, 8)}→${outMint.slice(0, 8)}`
+      );
+
+      if (!squadsResult.success) {
+        return res.status(500).json({
+          error: squadsResult.error ?? "Squads proposal failed",
+          proposed: false,
+          rationale: recommendation.rationale,
+        });
+      }
+
+      return res.json({
+        proposed: true,
+        rationale: recommendation.rationale,
+        message: "Squads proposal created. Await human approval.",
+        squads: {
+          signature: squadsResult.signature,
+          transactionIndex: squadsResult.transactionIndex?.toString(),
+          workflow: [
+            { step: 1, done: true, label: "Vault tx created" },
+            { step: 2, done: true, label: "Proposal created" },
+            { step: 3, done: false, label: "Await member approval in Squads" },
+            { step: 4, done: false, label: "Execute when approved" },
+          ],
+        },
+        quote: { inputAmount: amt, outputAmount: quote.outAmount, priceImpact: quote.priceImpactPct },
       });
     }
 
@@ -92,7 +188,7 @@ app.post("/api/propose-swap", async (req, res) => {
     res.json({
       proposed: true,
       rationale: recommendation.rationale,
-      message: "Squads SDK integration pending.",
+      message: "Squads not configured. Set SQUADS_MULTISIG_PDA and SQUADS_CREATE_KEY for multi-sig proposals.",
       quote: { inputAmount: amt, outputAmount: quote.outAmount, priceImpact: quote.priceImpactPct },
     });
   } catch (e) {
@@ -112,6 +208,21 @@ app.post("/api/execute-swap", async (req, res) => {
       error: "Agent wallet not configured",
       message: "Set AGENT_KEYPAIR in .env. Run: npm run generate:agent",
     });
+  }
+
+  const whitelist = (process.env.KYC_WHITELIST ?? "")
+    .split(",")
+    .map((w) => w.trim().toLowerCase())
+    .filter(Boolean);
+  if (whitelist.length > 0) {
+    const wallet = (req.headers["x-wallet-address"] as string)?.trim()?.toLowerCase();
+    if (!wallet || !whitelist.includes(wallet)) {
+      return res.status(403).json({
+        error: "KYC required",
+        message: "Only KYC-verified wallets can execute swaps. Add x-wallet-address header.",
+        executed: false,
+      });
+    }
   }
 
   try {
@@ -157,10 +268,30 @@ app.post("/api/execute-swap", async (req, res) => {
     }
 
     const txBuf = Buffer.from(swapData.swapTransaction, "base64");
-    const tx = VersionedTransaction.deserialize(txBuf);
-    tx.sign([agent]);
+    let tx = VersionedTransaction.deserialize(txBuf);
 
     const connection = new Connection(RPC);
+    const memo = req.body?.memo as string | undefined;
+    const memoText = memo?.trim() || `ATMS swap ${inMint.slice(0, 8)}→${outMint.slice(0, 8)} ${new Date().toISOString()}`;
+    try {
+      tx = await addMemoToSwapTransaction(connection, tx, memoText);
+    } catch (memoErr) {
+      const msg = memoErr instanceof Error ? memoErr.message : String(memoErr);
+      if (msg.includes("address lookup table")) {
+        tx = VersionedTransaction.deserialize(txBuf);
+        if (RPC.includes("devnet")) {
+          return res.status(400).json({
+            error: "Jupiter requires mainnet RPC. Swaps use mainnet lookup tables.",
+            hint: "Set VITE_SOLANA_RPC=https://api.mainnet-beta.solana.com (or Helius/QuickNode) in .env",
+            executed: false,
+          });
+        }
+      } else {
+        tx = VersionedTransaction.deserialize(txBuf);
+      }
+    }
+    tx.sign([agent]);
+
     const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
 
     res.json({
@@ -181,7 +312,7 @@ app.post("/api/execute-swap", async (req, res) => {
 
 app.get("/api/vault/balances", async (_req, res) => {
   if (!VAULT) {
-    return res.json({ usdc: 100_000, sol: 50, totalUsd: 107_500 });
+    return res.json({ usdc: 100_000, sol: 50, totalUsd: 107_500, demo: true });
   }
   const connection = new Connection(RPC);
   const vault = new PublicKey(VAULT);
@@ -200,14 +331,28 @@ app.get("/api/vault/balances", async (_req, res) => {
       if (info) solBalance = info.lamports / 1e9;
     } catch {}
     const totalUsd = usdcBalance + solBalance * 150;
-    res.json({ usdc: usdcBalance, sol: solBalance, totalUsd });
+    res.json({ usdc: usdcBalance, sol: solBalance, totalUsd, demo: false });
   } catch {
     res.status(500).json({ error: "Failed to fetch balances" });
   }
 });
 
-app.get("/api/proposals", (_req, res) => {
-  res.json({ proposals: getProposals() });
+app.get("/api/proposals", (req, res) => {
+  const demo = req.query.demo === "1" || req.query.demo === "true";
+  let proposals = getProposals();
+  if (proposals.length === 0 && (!VAULT || demo)) {
+    proposals = [{
+      id: "demo_1",
+      createdAt: new Date().toISOString(),
+      direction: "USDC→SOL" as const,
+      inAmount: "10000000",
+      outAmount: "6700000",
+      priceImpactPct: "0.18",
+      rationale: "Demo: ~0.18% yield. Low-impact treasury rebalancing. Click Create Squads Proposal to simulate the workflow.",
+      recommend: true,
+    }];
+  }
+  res.json({ proposals });
 });
 
 app.get("/api/agent/status", (_req, res) => {
@@ -221,8 +366,14 @@ app.get("/api/agent/status", (_req, res) => {
   });
 });
 
-app.post("/api/monitor/run", async (_req, res) => {
+app.post("/api/monitor/run", async (req, res) => {
+  const demoMode = req.headers["x-demo-mode"] === "true";
   try {
+    if (demoMode) {
+      const { runMarketMonitorDemo } = await import("./monitor.js");
+      const { found, proposals } = await runMarketMonitorDemo();
+      return res.json({ found, proposals });
+    }
     const { found, proposals } = await runMarketMonitor();
     res.json({ found, proposals });
   } catch (e) {

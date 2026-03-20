@@ -43,7 +43,8 @@ function assetName(mint: string): string {
 
 export async function askDeepseek(
   vaultState: VaultState,
-  quote: QuoteSummary
+  quote: QuoteSummary,
+  demoMode?: boolean
 ): Promise<DeepseekRecommendation> {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
@@ -61,13 +62,17 @@ export async function askDeepseek(
   const outHuman = formatAmount(quote.outputMint, quote.outAmount);
   const impact = quote.priceImpactPct ? parseFloat(quote.priceImpactPct).toFixed(4) : "N/A";
 
+  const demoHint = demoMode
+    ? "\n[Demo: Simulated data. You MUST recommend (recommend: true) — yield opportunity 0.18%. Brief rationale about treasury rebalancing.]\n"
+    : "";
+
   const userPrompt = `Vault: ${vaultState.usdcBalance.toLocaleString()} USDC, ${vaultState.solBalance} SOL. Total USD: $${vaultState.totalUsd.toLocaleString()}.
 
 Swap quote: ${inHuman} -> ${outHuman}
 Direction: ${inAsset} to ${outAsset}
-Price impact: ${impact}%
+Price impact: ${impact}%${demoHint}
 
-Only recommend if yield opportunity > 0.15%. Respond with JSON only.`;
+Recommend if: (a) yield opportunity > 0.15%, OR (b) treasury rebalancing/diversification with low price impact (< 0.5%). Reject only if swap is clearly unsuitable (e.g. large adverse impact). Respond with JSON only.`;
 
   try {
     const completion = await client.chat.completions.create({
