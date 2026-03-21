@@ -38,6 +38,12 @@ function DashboardContent() {
     proposed: boolean;
     rationale?: string;
     message?: string;
+    squads?: {
+      demo?: boolean;
+      signature?: string;
+      transactionIndex?: string;
+      workflow?: { step: number; done: boolean; label: string }[];
+    };
   } | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsLoading, setProposalsLoading] = useState(false);
@@ -410,7 +416,7 @@ function DashboardContent() {
               {proposeResult.proposed && proposeResult.squads?.workflow && (
                 <div className="mt-4 space-y-2 rounded-lg bg-slate-800/50 p-4">
                   <p className="text-sm font-medium text-slate-400">Squads workflow</p>
-                  {proposeResult.squads.workflow.map((w) => (
+                  {proposeResult.squads.workflow.map((w: { step: number; done: boolean; label: string }) => (
                     <div key={w.step} className="flex items-center gap-3 text-sm">
                       <span
                         className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${
@@ -492,6 +498,13 @@ function DashboardContent() {
                   <p className="mt-2 text-base text-slate-500">
                     {formatAmount(p.direction, p.inAmount, p.outAmount)}
                   </p>
+                  <button
+                    onClick={() => handleProposeFromOpportunity(p)}
+                    disabled={proposeLoading}
+                    className="mt-4 rounded-lg border-2 border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-sm font-medium text-cyan-400 transition hover:bg-cyan-500/20 disabled:opacity-50"
+                  >
+                    Create Squads Proposal
+                  </button>
                 </div>
               ))}
             </div>
